@@ -1,0 +1,285 @@
+database.py 
+from sqlmodel import SQLModel, create_engine, Session
+from typing import Generator
+
+
+DATABASE_URL = "sqlite:///./juego_cartas.db"
+
+
+engine = create_engine(DATABASE_URL, echo= True)
+
+
+def create_db_and_tables():
+    SQLModel.metadata.create_all(engine)
+
+def get_db() -> Generator[Session, None, None]:
+    with Session(engine) as session:
+        yield session
+
+
+Models
+jugador.py
+
+from typing import Optional, TYPE_CHECKING
+
+from sqlmodel import SQLModel, Field, Relationship
+
+if TYPE_CHECKING:
+    from .pelea import Pelea
+    from .pila import Pila
+
+
+class Jugador(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+
+    tipo: str = Field(default="jugador")
+
+    vida: int = Field(default=100, ge=0, le=100)
+    energia: int = Field(default=50, ge=0, le=50)
+
+    # Relación con Pelea
+    id_pelea: Optional[int] = Field(
+        default=None,
+        foreign_key="pelea.id"
+    )
+    pelea: Optional["Pelea"] = Relationship(
+        back_populates="jugadores"
+    )
+
+    # Relación con Pila
+    pila: Optional["Pila"] = Relationship(
+        back_populates="jugador"
+
+    )
+
+
+
+class JugadorUpdate(SQLModel):
+    vida: int | None = Field(default=None, ge=0, le=100)
+    energia: int | None = Field(default=None, ge=0, le=50)
+    
+
+class Maquina(Jugador):
+    tipo: str = "maquina"
+
+    
+
+class Persona(Jugador):
+    tipo: str = "persona"
+    username: str = Field(unique=True, index=True)
+
+
+Repositories
+from sqlmodel import select
+from models.jugador import Jugador
+from database.database import get_session
+
+
+
+def crear_jugador(jugador: Jugador):
+    with get_session() as session:
+        session.add(jugador)
+        session.commit()
+        session.refresh(jugador)
+
+        return jugador
+
+
+
+# Obtener todos los jugadores
+def get_jugadores():
+    with get_session() as session:
+        statement = select(Jugador)
+        return session.exec(statement).all()
+
+
+# Obtener un jugador por ID
+def get_jugador_id(id: int):
+    with get_session() as session:
+        statement = select(Jugador).where(Jugador.id == id)
+        return session.exec(statement).first()
+
+
+# Obtener todos los nombres de los jugadores
+def get_nombres_jugadores():
+    with get_session() as session:
+        statement = select(Jugador.tipo, Jugador.id)
+        return session.exec(statement).all()
+
+def get_personas():
+    with get_session() as session:
+        statement = select(Jugador).where(
+            Jugador.tipo == "persona"
+        )
+        return session.exec(statement).all()
+
+
+def get_maquinas():
+    with get_session() as session:
+        statement = select(Jugador).where(
+            Jugador.tipo == "maquina"
+        )
+        return session.exec(statement).all()
+
+
+
+def eliminar_jugador(jugador_id: int):
+    with get_session() as session:
+
+        jugador = session.get(Jugador, jugador_id)
+
+        if jugador is None:
+            return {"message": "Jugador no encontrado"}
+
+        session.delete(jugador)
+        session.commit()
+
+        return {"ok": True}
+    
+
+
+def modificar_jugador(jugador_id: int, datos: dict):
+    with get_session() as session:
+
+        jugador_db = session.get(Jugador, jugador_id)
+
+        if jugador_db is None:
+            return {"message": "Jugador no encontrado"}
+
+        datos_permitidos = {"vida", "energia"}
+
+        update_data = {
+            clave: valor
+            for clave, valor in datos.items()
+            if clave in datos_permitidos
+        }
+
+        jugador_db.sqlmodel_update(update_data)
+
+        session.add(jugador_db)
+        session.commit()
+        session.refresh(jugador_db)
+
+Routes
+from typing import Annotated
+from fastapi import APIRouter, Depends
+from models.jugador import Jugador, JugadorUpdate
+
+
+
+from repositories.jugador_db import (
+    get_jugadores,
+    get_jugador_id,
+    crear_jugador,
+    get_nombres_jugadores,
+    get_personas,
+    get_maquinas,
+    eliminar_jugador,
+    modificar_jugador
+)
+
+router = APIRouter(
+    prefix="/jugadores",
+    tags=["Jugadores"]
+)
+
+
+
+@router.post("/")
+def agregar_jugador(jugador: Jugador):
+    nuevo_jugador = crear_jugador(jugador)
+    return nuevo_jugador
+
+
+# GET: Todos los jugadores
+@router.get("/")
+def listar_jugadores():
+    return get_jugadores()
+
+
+# GET: Nombres de los jugadores
+@router.get("/nombres")
+def listar_nombres():
+    return get_nombres_jugadores()
+
+
+# GET: Todas las personas
+@router.get("/personas")
+def listar_personas():
+    return get_personas()
+
+
+# GET: Todas las maquinas
+@router.get("/maquinas")
+def listar_maquinas():
+    return get_maquinas()
+
+
+# GET: Jugador por ID
+@router.get("/{id}")
+def buscar_jugador(id: int):
+    jugador = get_jugador_id(id)
+
+    if jugador is None:
+        raise HTTPException(404, "Jugador no encontrado")
+
+    return jugador
+
+
+# PUT: Modificar jugador
+@router.put("/{id}")
+def actualizar_jugador(id: int, datos: JugadorUpdate):
+    resultado = modificar_jugador(
+        id,
+        datos.model_dump(exclude_unset=True)
+    )
+
+    if resultado is None:
+        raise HTTPException(404, "Jugador no encontrado")
+
+    return resultado
+
+
+# DELETE: Eliminar jugador
+@router.delete("/{id}")
+def borrar_jugador(id: int):
+    resultado = eliminar_jugador(id)
+
+    if not resultado.get("ok"):
+        raise HTTPException(404, "Jugador no encontrado")
+
+    return resultado
+
+    Main.py
+
+from fastapi import APIRouter,FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
+
+from Modelo.routes import insumos, jugador, usuario, prestamo
+
+from sqlmodel import SQLModel, Session
+
+from Modelo.database.database import engine
+
+from Modelo.models.jugador import Jugador,JugadorUpdate, Persona, Maquina
+
+
+app = FastAPI() 
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"]
+)
+
+app.include_router(jugador.router)
+
+
+@app.get("/")
+async def root():
+    return RedirectResponse(url="/docs") 
+
+
